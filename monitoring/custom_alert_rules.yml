@@ -1,0 +1,18 @@
+groups:
+- name: system-alerts
+  rules:
+  - alert: LowCPUUtilization
+    expr: (avg(rate(node_cpu_seconds_total{mode!="idle"}[1m])) * 100) < 50
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      description: CPU utilization has been below 50% for more than 1 minute
+
+  - alert: LowMemoryUsage
+    expr: ((node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes) * 100 < 50
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      description: Memory usage is below 50% for over 2 minutes

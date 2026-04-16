@@ -1,0 +1,43 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exam-app
+  namespace: exam-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: exam-app
+  template:
+    metadata:
+      labels:
+        app: exam-app
+    spec:
+      containers:
+      - name: lighttpd-container
+        image: alpine:latest
+        command: ["sh", "-c", "while true; do sleep 30; done"]
+        ports:
+          - containerPort: 80
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "4"
+            memory: "1Gi"
+        volumeMounts:
+          - mountPath: /var/www/localhost/htdocs
+            name: shared-storage
+
+      - name: logger-container
+        image: busybox:latest
+        command: ["sh", "-c", "while true; do sleep 30; done"]
+        volumeMounts:
+          - mountPath: /logs
+            name: shared-storage
+
+      volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: exam-shared-pvc

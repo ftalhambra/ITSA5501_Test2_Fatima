@@ -1,0 +1,128 @@
+name: Test 2 Autograder
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  autograde:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout student repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl bc docker-compose
+          curl -LO https://github.com/prometheus/prometheus/releases/download/v2.50.0/prometheus-2.50.0.linux-amd64.tar.gz
+          tar -xzf prometheus-2.50.0.linux-amd64.tar.gz
+          sudo mv prometheus-2.50.0.linux-amd64/promtool /usr/local/bin/
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Install KinD
+        run: |
+          curl -Lo kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/
+
+      - name: Create Kubernetes cluster
+        run: |
+          kind create cluster --name exam-cluster
+          kubectl cluster-info
+
+      - name: Create namespace
+        run: |
+          kubectl apply -f k8s/*namespace*.y*ml
+          until kubectl get namespace exam-system; do sleep 1; done
+
+      - name: Deploy PVC
+        run: kubectl apply -f k8s/pvc.yml
+
+      - name: Deploy application
+        run: kubectl apply -f k8s/deployment.yml
+
+      - name: Run Kubernetes & Monitoring Autograder
+        run: |
+          SCORE=0
+          REPORT="grade_report.txt"
+
+          add_score() {
+            SCORE=$(echo "$SCORE + $1" | bc)
+            echo "$2 (+$1)" >> "$REPORT"
+          }
+
+          echo "Kubernetes & Monitoring Exam – Autograde Report" > "$REPORT"
+          echo "===============================================" >> "$REPORT"
+
+          echo "" >> "$REPORT"
+          echo "[KUBERNETES]" >> "$REPORT"
+
+          kubectl get ns exam-system &>/dev/null && add_score 0.5 "Namespace exam-system exists"
+          kubectl get pvc exam-shared-pvc -n exam-system &>/dev/null && add_score 0.5 "PVC exam-shared-pvc exists"
+
+          PVC_SIZE=$(kubectl get pvc exam-shared-pvc -n exam-system -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null)
+          [ "$PVC_SIZE" = "750Mi" ] && add_score 0.5 "PVC storage request is 750Mi"
+
+          ACCESS_MODE=$(kubectl get pvc exam-shared-pvc -n exam-system -o jsonpath='{.spec.accessModes[0]}' 2>/dev/null)
+          [ "$ACCESS_MODE" = "ReadWriteOnce" ] && add_score 0.5 "PVC access mode ReadWriteOnce"
+
+          kubectl get deployment exam-app -n exam-system &>/dev/null && add_score 0.5 "Deployment exam-app exists"
+
+          kubectl get deployment exam-app -n exam-system -o json | \
+          jq -e '.spec.template.spec.containers[] | select(.name=="lighttpd-container" and .image=="lighttpd:latest")' \
+          &>/dev/null && add_score 0.5 "lighttpd-container configured correctly"
+
+          kubectl get deployment exam-app -n exam-system -o json | \
+          jq -e '.spec.template.spec.containers[] | select(.name=="logger-container")' \
+          &>/dev/null && add_score 0.5 "logger-container exists"
+
+          kubectl get deployment exam-app -n exam-system -o json | \
+          jq -e '.spec.template.spec.volumes[] | select(.persistentVolumeClaim.claimName=="exam-shared-pvc")' \
+          &>/dev/null && add_score 0.5 "Shared PVC volume mounted"
+
+          REPLICAS=$(kubectl get deployment exam-app -n exam-system -o jsonpath='{.spec.replicas}' 2>/dev/null)
+          [ "$REPLICAS" -eq 3 ] && add_score 0.5 "Deployment scaled to 3 replicas"
+
+          RUNNING=$(kubectl get pods -n exam-system --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
+          [ "$RUNNING" -ge 3 ] && add_score 0.5 "All pods are running"
+
+          echo "" >> "$REPORT"
+          echo "[MONITORING]" >> "$REPORT"
+
+          if [ ! -d "monitoring" ] || [ -z "$(ls -A monitoring 2>/dev/null)" ]; then
+            echo "Monitoring folder missing or empty — 0 / 5" >> "$REPORT"
+          else
+            docker-compose -f monitoring/docker-compose.yml config &>/dev/null && add_score 0.5 "Valid docker-compose.yml"
+            promtool check config monitoring/prometheus.yml &>/dev/null && add_score 0.5 "Valid prometheus.yml"
+            grep -q "scrape_interval: 45s" monitoring/prometheus.yml && add_score 0.5 "Scrape interval set to 45s"
+            grep -q "job_name: node-performance-monitor" monitoring/prometheus.yml && add_score 0.5 "node-performance-monitor job exists"
+            grep -q "prometheus-self-monitoring" monitoring/prometheus.yml && add_score 0.5 "prometheus-self-monitoring job exists"
+            grep -q "metric_relabel_configs" monitoring/prometheus.yml && add_score 0.5 "Metric filtering configured"
+            promtool check rules monitoring/alert_rules.yml &>/dev/null && add_score 0.5 "Valid alert rules file"
+            grep -q "LowCPUUtilization" monitoring/alert_rules.yml && add_score 0.5 "LowCPUUtilization alert defined"
+            grep -q "LowMemoryUsage" monitoring/alert_rules.yml && add_score 0.5 "LowMemoryUsage alert defined"
+            grep -q "alertmanager" monitoring/prometheus.yml && add_score 0.5 "Alertmanager configured"
+            grep -q "custom_alert_rules.yml" monitoring/prometheus.yml && add_score 0.5 "Prometheus loads alert rules"
+          fi
+
+          echo "" >> "$REPORT"
+          echo "FINAL SCORE: $SCORE / 10" >> "$REPORT"
+          echo "============================"
+          cat "$REPORT"
+          echo "============================"
+
+      - name: Upload grading report
+        uses: actions/upload-artifact@v4
+        with:
+          name: grading-report
+          path: grade_report.txt
+          
